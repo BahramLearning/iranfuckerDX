@@ -20,6 +20,22 @@ on:
         required: false
         default: 90
         type: number
+      youtube_format:
+        description: 'YouTube quality (best/bestvideo+bestaudio/bestaudio/worst)'
+        required: false
+        default: 'best'
+        type: string
+      bypass_method:
+        description: 'YouTube bypass method'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - cookiefile
+          - oauth2
+          - anonymous
+          - extractor_args
 
 jobs:
   save-file:
@@ -32,217 +48,192 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install ultimate YouTube downloader setup
+      - name: Install aria2, zip, and yt-dlp
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 zip ffmpeg python3-pip wget curl
-          
-          # Install yt-dlp with all dependencies
-          pip3 install yt-dlp --upgrade --break-system-packages || pip3 install yt-dlp --upgrade
-          
-          # Also install youtube-dl as backup
-          pip3 install youtube-dl --break-system-packages || pip3 install youtube-dl
-          
-          # Install gallery-dl for additional sites
-          pip3 install gallery-dl --break-system-packages || pip3 install gallery-dl
-          
-          # Download latest cookies extractor
-          wget https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/yt_dlp/extractor/youtube.py -O /tmp/youtube_extractor.py || true
+          sudo apt-get install -y aria2 zip ffmpeg python3-pip
+          pip3 install yt-dlp --break-system-packages || pip3 install yt-dlp
 
-      - name: AVASAM Downloader - Advanced YouTube Bypass
+      - name: Setup YouTube cookies (optional)
         run: |
-          echo "🏷️  AVASAM - Ultimate Download Solution"
+          # Check if cookies.txt is stored in repo secrets
+          if [ -n "${{ secrets.YT_COOKIES }}" ]; then
+            echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+            echo "✅ Cookies file loaded from secrets"
+          elif [ -n "${{ secrets.YT_COOKIES_BASE64 }}" ]; then
+            echo "${{ secrets.YT_COOKIES_BASE64 }}" | base64 -d > cookies.txt
+            echo "✅ Cookies file loaded from base64 secrets"
+          else
+            echo "⚠️ No cookies found in secrets, using anonymous mode"
+          fi
+
+      - name: AVASAM Downloader - https://avasam.ir
+        run: |
+          echo "🏷️  AVASAM - Your Download Solution"
           echo "🌐 https://avasam.ir"
           echo ""
 
-      - name: Download with aggressive bypass
+      - name: Download files (including YouTube with bypass)
         run: |
-          URLS="${{ github.event.inputs.urls }}"
           MODE="${{ github.event.inputs.mode }}"
+          URLS="${{ github.event.inputs.urls }}"
           SPLIT_THRESHOLD_MB="${{ github.event.inputs.split_threshold_mb }}"
+          YT_FORMAT="${{ github.event.inputs.youtube_format }}"
+          BYPASS_METHOD="${{ github.event.inputs.bypass_method }}"
           SPLIT_THRESHOLD_BYTES=$(( SPLIT_THRESHOLD_MB * 1024 * 1024 ))
 
-          mkdir -p downloads tmp_downloads
-          
-          # Create a comprehensive yt-dlp config
-          cat > yt-dlp.conf << 'EOF'
-          # Format selection
-          -f bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best
-          
-          # Merge options
-          --merge-output-format mp4
-          
-          # Bypass methods - AGGRESSIVE
-          --extractor-args "youtube:player_client=android,ios,web;youtube:skip=hls,dash,webpage,js;youtube:include_client=android_embedded"
-          --extractor-args "youtube:player_skip=configs,webpage,js"
-          --geo-bypass
-          --geo-bypass-country US
-          --sleep-requests 0.5
-          --sleep-interval 1
-          --max-sleep-interval 3
-          --retries 25
-          --fragment-retries 25
-          --skip-unavailable-fragments
-          --no-check-certificate
-          --no-cache-dir
-          
-          # Use different clients
-          --extractor-args "youtube:android_client=android_embedded"
-          --extractor-args "youtube:ios_client=ios_embedded"
-          
-          # Force HTTP/1.1
-          --downloader-args "aria2c:-x 16 -k 1M --http1.1"
-          EOF
+          echo "🏷️  AVASAM (https://avasam.ir) - Downloading with mode: $MODE"
+          echo "Split threshold: $SPLIT_THRESHOLD_MB MB"
+          echo "YouTube format: $YT_FORMAT"
+          echo "Bypass method: $BYPASS_METHOD"
 
-          # Download function with multiple strategies
-          download_with_retry() {
+          mkdir -p downloads tmp_downloads
+
+          # Build yt-dlp command with bypass methods
+          build_ytdlp_cmd() {
             local url="$1"
             local output="$2"
-            local strategy="$3"
+            local cmd="yt-dlp"
             
-            echo "🔄 Strategy $strategy for: $url"
+            # Add format
+            cmd="$cmd -f \"$YT_FORMAT\""
             
-            case $strategy in
-              1)
-                # Method 1: Android embedded client (works often)
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:player_client=android_embedded,android" \
-                  -o "$output" \
-                  "$url" && return 0
+            # Add merge output format
+            cmd="$cmd --merge-output-format mkv"
+            
+            # Add output template
+            cmd="$cmd -o \"$output\""
+            
+            # Add bypass methods based on selection
+            case "$BYPASS_METHOD" in
+              cookiefile)
+                if [ -f "cookies.txt" ]; then
+                  cmd="$cmd --cookies cookies.txt"
+                else
+                  cmd="$cmd --extractor-args \"youtube:skip=webpage\""
+                fi
                 ;;
-              2)
-                # Method 2: iOS client
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:player_client=ios_embedded,ios" \
-                  -o "$output" \
-                  "$url" && return 0
+              oauth2)
+                cmd="$cmd --username \"oauth2\" --password \"\""
                 ;;
-              3)
-                # Method 3: Web client with different signature
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:player_client=web,web_embedded" \
-                  --extractor-args "youtube:player_skip=webpage" \
-                  -o "$output" \
-                  "$url" && return 0
+              anonymous)
+                cmd="$cmd --extractor-args \"youtube:player_client=android,web\""
                 ;;
-              4)
-                # Method 4: TV client (sometimes works on restricted content)
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:player_client=tv_embedded,tv" \
-                  -o "$output" \
-                  "$url" && return 0
+              extractor_args)
+                cmd="$cmd --extractor-args \"youtube:skip=hls,dash,webpage;youtube:player_client=android,ios,web\""
                 ;;
-              5)
-                # Method 5: Media Connect client
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:player_client=mediaconnect" \
-                  -o "$output" \
-                  "$url" && return 0
-                ;;
-              6)
-                # Method 6: Use yt-dlp with innertube API key
-                yt-dlp --config-location yt-dlp.conf \
-                  --extractor-args "youtube:innertube_host=www.youtube-nocookie.com" \
-                  --extractor-args "youtube:innertube_key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8" \
-                  -o "$output" \
-                  "$url" && return 0
-                ;;
-              7)
-                # Method 7: Old youtube-dl as fallback
-                youtube-dl -f "best[ext=mp4]" \
-                  --geo-bypass \
-                  --retries 10 \
-                  -o "$output" \
-                  "$url" && return 0
-                ;;
-              8)
-                # Method 8: Try downloading just audio first, then convert
-                yt-dlp -f "bestaudio" \
-                  --extract-audio \
-                  --audio-format mp3 \
-                  --audio-quality 0 \
-                  -o "$output" \
-                  "$url" && return 0
-                ;;
-              9)
-                # Method 9: Use gallery-dl as last resort
-                gallery-dl -o "output.filename=$output" \
-                  --retries 5 \
-                  "$url" && return 0
+              auto)
+                # Try multiple methods automatically
+                if [ -f "cookies.txt" ]; then
+                  cmd="$cmd --cookies cookies.txt"
+                else
+                  cmd="$cmd --extractor-args \"youtube:player_client=android,web\""
+                fi
                 ;;
             esac
-            return 1
+            
+            # Add more bypass options
+            cmd="$cmd --no-check-certificate"
+            cmd="$cmd --geo-bypass"
+            cmd="$cmd --sleep-requests 1"
+            cmd="$cmd --sleep-interval 2"
+            cmd="$cmd --max-sleep-interval 5"
+            cmd="$cmd --retries 10"
+            cmd="$cmd --fragment-retries 10"
+            
+            echo "$cmd"
           }
 
-          # Process each URL
+          # Download each URL
           for URL in $URLS; do
-            echo "========================================="
-            echo "🎯 Processing: $URL"
-            echo "========================================="
+            echo "⬇️ Processing: $URL"
             
-            cd tmp_downloads
-            
+            # Check if it's a YouTube URL
             if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
-              echo "🎬 YouTube video detected - applying 9 bypass strategies"
+              echo "🎬 YouTube detected! Using yt-dlp with bypass method: $BYPASS_METHOD"
+              cd tmp_downloads
               
-              # Try to get video info first
-              VIDEO_ID=$(echo "$URL" | grep -oE '(v=|/)([a-zA-Z0-9_-]{11})' | head -1 | sed 's/.*=//;s/.*\///')
-              OUTPUT_TEMPLATE="%(title)s [${VIDEO_ID}].%(ext)s"
+              # Try primary method
+              YTDLP_CMD=$(build_ytdlp_cmd "$URL" "%(title)s.%(ext)s")
+              echo "Running: $YTDLP_CMD"
               
-              SUCCESS=0
-              for strategy in {1..9}; do
-                if download_with_retry "$URL" "$OUTPUT_TEMPLATE" $strategy; then
-                  SUCCESS=1
-                  echo "✅ SUCCESS with strategy $strategy!"
-                  break
-                else
-                  echo "❌ Strategy $strategy failed"
-                  sleep 2
-                fi
-              done
+              eval $YTDLP_CMD "$URL" 2>&1 | tee download.log
               
-              if [ $SUCCESS -eq 0 ]; then
-                echo "💀 ALL STRATEGIES FAILED for $URL"
-                echo "This video may require cookies or is DRM protected"
+              # If failed, try fallback methods
+              if [ ${PIPESTATUS[0]} -ne 0 ]; then
+                echo "⚠️ Primary method failed, trying fallback methods..."
                 
-                # Save failed URL for manual processing
-                echo "$URL" >> ../downloads/failed_urls.txt
+                # Fallback 1: Use Android client
+                echo "🔄 Fallback 1: Android client"
+                yt-dlp -f "$YT_FORMAT" \
+                  --extractor-args "youtube:player_client=android" \
+                  --merge-output-format mkv \
+                  --retries 10 \
+                  --no-check-certificate \
+                  -o "%(title)s.%(ext)s" \
+                  "$URL"
+                
+                # Fallback 2: Use cookies if available
+                if [ $? -ne 0 ] && [ -f "../cookies.txt" ]; then
+                  echo "🔄 Fallback 2: Using cookies file"
+                  yt-dlp -f "$YT_FORMAT" \
+                    --cookies "../cookies.txt" \
+                    --merge-output-format mkv \
+                    --retries 10 \
+                    -o "%(title)s.%(ext)s" \
+                    "$URL"
+                fi
+                
+                # Fallback 3: Audio only (if video fails)
+                if [ $? -ne 0 ]; then
+                  echo "🔄 Fallback 3: Trying audio only"
+                  yt-dlp -f "bestaudio" \
+                    --extract-audio \
+                    --audio-format mp3 \
+                    --retries 10 \
+                    -o "%(title)s.%(ext)s" \
+                    "$URL"
+                fi
               fi
               
+              cd ..
             else
-              # Regular download
+              # Regular direct download
               FILENAME=$(basename "$URL")
-              echo "📁 Regular download: $FILENAME"
-              aria2c -x 16 -s 16 -k 1M --http1.1 \
-                --dir="." \
+              echo "📁 Direct download: $FILENAME"
+              aria2c \
+                --split=2 \
+                --max-connection-per-server=2 \
+                --min-split-size=90M \
+                --dir="tmp_downloads" \
                 --out="$FILENAME" \
-                "$URL" || wget -O "$FILENAME" "$URL"
+                "$URL"
             fi
-            
-            cd ..
-            echo ""
           done
 
-          # Process downloaded files
-          echo "📦 Processing downloads..."
-          
+          # Create .download_log for debugging
+          if [ -f "tmp_downloads/download.log" ]; then
+            cp tmp_downloads/download.log downloads/download_debug.log
+          fi
+
+          # Zip all downloads if mode is 'zip'
           if [ "$MODE" = "zip" ]; then
             ARCHIVE_NAME="downloads/archive_$(date +%Y%m%d_%H%M%S).zip"
-            find tmp_downloads -type f -size +0c -exec zip -j "$ARCHIVE_NAME" {} \;
+            echo "📦 Creating zip archive: $ARCHIVE_NAME"
+            zip -j "$ARCHIVE_NAME" tmp_downloads/* 2>/dev/null || true
             rm -rf tmp_downloads
           else
+            # Normal mode: handle splitting large files
             for FILE in tmp_downloads/*; do
               [ -f "$FILE" ] || continue
+              # Skip log files for splitting
+              [[ "$FILE" == *".log" ]] && continue
+              
               SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo "0")
               BASENAME=$(basename "$FILE")
-              
-              if [ "$SIZE" -eq 0 ]; then
-                echo "⚠️ Skipping empty file: $BASENAME"
-                continue
-              fi
-              
+
               if [ "$SPLIT_THRESHOLD_BYTES" -gt 0 ] && [ "$SIZE" -gt "$SPLIT_THRESHOLD_BYTES" ]; then
-                echo "✂️ Splitting large file: $BASENAME"
+                echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting"
                 zip -0 -s "${SPLIT_THRESHOLD_MB}m" "downloads/${BASENAME}.zip" -j "$FILE"
               else
                 cp "$FILE" "downloads/$BASENAME"
@@ -250,24 +241,37 @@ jobs:
             done
             rm -rf tmp_downloads
           fi
-          
-          # Create summary report
-          echo "📊 Download Summary:" > downloads/SUMMARY.txt
-          echo "===================" >> downloads/SUMMARY.txt
-          ls -lh downloads/ | grep -v SUMMARY >> downloads/SUMMARY.txt
-          
-          if [ -f downloads/failed_urls.txt ]; then
-            echo "" >> downloads/SUMMARY.txt
-            echo "❌ Failed URLs:" >> downloads/SUMMARY.txt
-            cat downloads/failed_urls.txt >> downloads/SUMMARY.txt
-          fi
 
-      - name: Commit & Push
+      - name: Commit & Push in batches of 5 files (AVASAM)
         run: |
+          BRANCH="${GITHUB_REF_NAME}"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+
+          echo "🏷️  AVASAM (https://avasam.ir) - Preparing to commit files"
+
+          # Collect all new/modified files under downloads/
+          mapfile -t ALL_FILES < <(git ls-files --others --modified --exclude-standard downloads/ 2>/dev/null || find downloads -type f -not -path "*/\.*" 2>/dev/null)
+
+          TOTAL=${#ALL_FILES[@]}
+          echo "📦 Total files to push: $TOTAL"
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          # Add all files
+          git add downloads/
           
-          if [ -d "downloads" ] && [ "$(ls -A downloads)" ]; then
+          # Commit all at once (simpler, avoids rebase conflicts)
+          git commit -m "[AVASAM] Add downloaded files [skip ci]" || echo "No changes to commit"
+          
+          # Push with force-with-lease to avoid conflicts
+          git pull --rebase origin "$BRANCH" || true
+          git push origin HEAD:"$BRANCH" || git push --force-with-lease origin HEAD:"$BRANCH"
+
+          echo "🎉 All $TOTAL files pushed — AVASAM (https://avasam.ir)"oads)" ]; then
             git add downloads/
             git commit -m "[AVASAM] Downloaded content [skip ci]" || echo "No changes"
             git pull --rebase origin ${GITHUB_REF_NAME} || true
